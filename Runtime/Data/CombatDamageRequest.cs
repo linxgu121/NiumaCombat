@@ -14,6 +14,7 @@ namespace NiumaCombat.Data
         public string SkillId;
         public string HitboxId;
         public string HurtboxId;
+        public string[] TargetTags = Array.Empty<string>();
         public Vector3 HitPoint;
         public Vector3 HitDirection;
         public Vector3 SourcePosition;
@@ -25,6 +26,7 @@ namespace NiumaCombat.Data
         public float DefenseScale;
         public string ResistanceAttributeId;
         public float DamageMultiplier = 1f;
+        public float BodyPartMultiplier = 1f;
         public float CritRateOverride = -1f;
         public float CritDamageOverride = -1f;
         public bool CanCrit = true;
@@ -43,6 +45,7 @@ namespace NiumaCombat.Data
                 SkillId = SkillId,
                 HitboxId = HitboxId,
                 HurtboxId = HurtboxId,
+                TargetTags = TargetTags != null ? (string[])TargetTags.Clone() : Array.Empty<string>(),
                 HitPoint = HitPoint,
                 HitDirection = HitDirection,
                 SourcePosition = SourcePosition,
@@ -54,6 +57,7 @@ namespace NiumaCombat.Data
                 DefenseScale = DefenseScale,
                 ResistanceAttributeId = ResistanceAttributeId,
                 DamageMultiplier = DamageMultiplier,
+                BodyPartMultiplier = BodyPartMultiplier,
                 CritRateOverride = CritRateOverride,
                 CritDamageOverride = CritDamageOverride,
                 CanCrit = CanCrit,
