@@ -16,6 +16,24 @@ namespace NiumaCombat.Data
         public float HealScale;
         public float HealMultiplier = 1f;
 
+        public bool HasRuntimeFields()
+        {
+            return !string.IsNullOrWhiteSpace(RequestId)
+                || !string.IsNullOrWhiteSpace(SourceActorId)
+                || !string.IsNullOrWhiteSpace(TargetActorId)
+                || !string.IsNullOrWhiteSpace(SkillId)
+                || HitPoint.sqrMagnitude > 0.0001f;
+        }
+
+        public void ClearRuntimeFields()
+        {
+            RequestId = string.Empty;
+            SourceActorId = string.Empty;
+            TargetActorId = string.Empty;
+            SkillId = string.Empty;
+            HitPoint = Vector3.zero;
+        }
+
         public CombatHealRequest Clone()
         {
             return new CombatHealRequest

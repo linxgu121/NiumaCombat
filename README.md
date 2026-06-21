@@ -215,6 +215,7 @@ FinalValue = max(0, AfterResistance * BodyPartMultiplier)
 
 - `ApplyDamage` 在发布 `CombatHitConfirmedEvent` 前会先预留命中记录和有效命中次数，防止同步事件订阅者在同一帧重入 `ApplyDamage` 时绕过 `MaxHitCount` 或重复命中过滤。若后续 Attribute 写入失败，会回滚这次预留。
 - `TryRegisterHit` 会走同一套预留命中记录逻辑。传入不存在、已关闭或已超出 `MaxHitCount` 的 `AttackInstanceId` 时返回 `false`，不会写入命中记录。
+- 如果直接 new `CombatService` 但没有注入 HitboxService，带 `AttackInstanceId` 的 `TryRegisterHit / ApplyDamage` 会按 `InternalError` 处理；只有 HitboxService 存在但实例已关闭或不存在时，才返回 `HitboxNotActive`。
 - `MaxHitCount` 的最终判定集中在命中预留阶段；`ApplyDamage` 不再做多层重复预检查，避免状态判断分散。
 - `ICombatHitboxService` 不再暴露 `Tick`。业务层只使用 `OpenHitbox`、`CloseHitbox`、`IsHitboxActive`；Hitbox 超时关闭由 `ICombatService.Tick` 内部驱动。
 - `CombatResultType.Blocked` 表示伤害公式最终值 `FinalValue <= 0`，例如被防御、抗性或倍率压到 0。Blocked 会触发 `CombatHitConfirmedEvent`，不会触发 `CombatDamageAppliedEvent`，也不是 Rejected。
@@ -222,3 +223,15 @@ FinalValue = max(0, AfterResistance * BodyPartMultiplier)
 - `Reaction.HitDirection` 的最终兜底由 `CombatService` 处理。Driver 只写入请求级 `HitDirection`，不再直接改写 `Reaction`。
 - `CombatHitboxDriver` 自动查找 `ICombatRuntimeServiceProvider` 只是兜底，并带全局 1 秒节流。正式场景仍建议把 `NiumaCombatController` 拖到 `Combat Service Provider`。
 - `ApplyHeal` 第一版允许 `SourceActorId` 为空，不检查治疗来源是否存活；`TargetActorId` 必须存在且目标存活。
+
+## Skill 接入
+
+第五阶段开始，`NiumaSkill` 可通过 `SkillDefinition.CombatOutputs` 调用 Combat。
+
+- Combat 数据层提供 `SkillCombatOutputData`，字段包括 `DamageTemplate`、`HealTemplate`、`ApplyToPrimaryTarget`、`ApplyToAllResolvedTargets`。
+- `SkillCombatOutputData` 位于 `NiumaCombat.Runtime/Data`，这是第五阶段的有意设计：`NiumaSkill` 已经需要 `ICombatCommand`，所以直接引用 `NiumaCombat.Runtime`。第一版不额外拆 `SkillBridge`。
+- `NiumaSkillController` 需要绑定 `NiumaCombatController`，或通过 `GameContext` 解析 `ICombatCommand`。
+- Skill 命中成功后才调用 `ApplyDamage / ApplyHeal`；Skill 未命中不调用 Combat。
+- Skill 直接结算 Combat 时不填写 `AttackInstanceId`，因此不参与 Hitbox 激活周期的防重复命中。
+- `DamageTemplate` / `HealTemplate` 里不要手动填写 `RequestId`、`SourceActorId`、`TargetActorId`、`SkillId`、`AttackInstanceId` 等运行时字段。`SkillDefinition.OnValidate` 和 Skill 运行时生成请求时都会清理这些字段，再写入本次释放的上下文。
+- CombatResult 会返回到 `SkillCastResult.CombatResults`，后续 UI / TPC / Audio 桥接以 CombatResult 为事实来源。

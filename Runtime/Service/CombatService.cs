@@ -362,6 +362,18 @@ namespace NiumaCombat.Service
 
             var key = BuildHitKey(record.AttackInstanceId, record.TargetActorId);
             var hasExistingHit = _hitRecords.TryGetValue(key, out var existingRecord);
+            if (_hitboxRuntimeAccess == null)
+            {
+                failureReason = CombatFailureReason.InternalError;
+                return false;
+            }
+
+            if (!_hitboxRuntimeAccess.IsHitboxActive(record.AttackInstanceId))
+            {
+                failureReason = CombatFailureReason.HitboxNotActive;
+                return false;
+            }
+
             var definition = TryGetActiveHitboxDefinition(record.AttackInstanceId, out var activeDefinition) ? activeDefinition : null;
 
             if (!hasExistingHit)
@@ -487,7 +499,13 @@ namespace NiumaCombat.Service
             CombatHitboxDefinition definition = null;
             if (!string.IsNullOrWhiteSpace(request.AttackInstanceId))
             {
-                if (_hitboxRuntimeAccess == null || !_hitboxRuntimeAccess.IsHitboxActive(request.AttackInstanceId))
+                if (_hitboxRuntimeAccess == null)
+                {
+                    failureReason = CombatFailureReason.InternalError;
+                    return false;
+                }
+
+                if (!_hitboxRuntimeAccess.IsHitboxActive(request.AttackInstanceId))
                 {
                     failureReason = CombatFailureReason.HitboxNotActive;
                     return false;
