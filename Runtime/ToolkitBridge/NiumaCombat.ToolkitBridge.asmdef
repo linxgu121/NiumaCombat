@@ -1,0 +1,15 @@
+{
+  "name": "NiumaCombat.ToolkitBridge",
+  "references": [
+    "NiumaCombat.Runtime",
+    "NiumaUI.Runtime"
+  ],
+  "includePlatforms": [],
+  "excludePlatforms": [],
+  "allowUnsafeCode": false,
+  "overrideReferences": false,
+  "precompiledReferences": [],
+  "autoReferenced": true,
+  "defineConstraints": [],
+  "versionDefines": []
+}

@@ -219,6 +219,82 @@ PlayerRoot
 - `TPCCombatBridge` 会把 `CombatResult.HitDirection` 作为 `Reaction.HitDirection` 为空时的兜底方向，并透传 `StaggerSeconds`、`KnockbackDistance`、`HitVfxCueId`、`HitAudioCueId` 到 `TPCCombatReactionRequest`。第一版 TPC 只保留这些字段，后续由受击状态、VFX 或 Audio 桥接消费。
 - 第一版 `Immune` 是过滤 / 拒绝类结果，不会通过 `CombatHitConfirmedEvent` 驱动 TPC 格挡表现；如果后续需要免疫动作或免疫音效，应订阅 `CombatResultRejectedEvent` 或新增专门事件。
 
+## UI Toolkit 桥接
+
+第七阶段新增两层 UI 接入：
+
+- `CombatUIViewBridge`：位于 `Runtime/Bridge`，只依赖 `NiumaCombat.Runtime`。负责把 Combat 事件和最近结果缓存转成 `CombatUIUpdate`。
+- `CombatToolkitReceiver / CombatToolkitBindingProvider / CombatToolkitBinding`：位于 `Runtime/ToolkitBridge`，独立程序集 `NiumaCombat.ToolkitBridge`，引用 `NiumaCombat.Runtime` 和 `NiumaUI.Runtime`。
+
+推荐挂载位置：
+
+```text
+CoreScene
+└── BootstrapRoot
+    ├── GameplayServicesRoot
+    │   └── NiumaCombatController
+    └── UIRoot
+        ├── UIBridges
+        │   ├── CombatUIViewBridge
+        │   └── CombatToolkitReceiver
+        └── BindingProviders
+            └── CombatToolkitBindingProvider
+```
+
+### CombatUIViewBridge
+
+| 字段 | 建议填写 | 可留空 | 不填会怎样 |
+| --- | --- | --- | --- |
+| `Combat Controller` | 拖 `GameplayServicesRoot` 上的 `NiumaCombatController` | 可以 | 开启自动查找时会尝试找场景里的 `NiumaCombatController`；找不到则无法刷新 |
+| `Combat UI Receiver Provider` | 使用 Toolkit 时拖 `CombatToolkitReceiver` | 不建议 | 没有 Receiver 时只会输出警告，不会显示 UI |
+| `Auto Find Combat Controller` | 正式场景建议关闭并手动绑定；测试场景可开启 | 可以 | 关闭且没拖 Controller 时不会自动找 |
+| `Refresh On Enable` | 开启 | 可以 | 关闭后需要手动调用 `RefreshCombatPanel()` |
+| `Refresh In Late Update` | 开启 | 可以 | 关闭后不会按 Revision 自动刷新最近结果 |
+| `Push Result Events` | 开启 | 可以 | 关闭后不会即时推送飘字，只靠轮询刷新面板 |
+| `Include Rejected Results` | 开启用于调试免疫、过滤、失败；正式 UI 可关闭 | 可以 | 关闭后 `CombatResultRejectedEvent` 不会显示 |
+| `Actor Id` | 玩家填 `player`，NPC 填对应稳定 ActorId | 不建议 | 为空时桥接会发送 Cleared |
+| `Result Role` | 玩家受击 UI 用 `Target`；战斗调试面板可用 `Either` | 可以 | 读取来源结果、受击结果或两者 |
+| `Max Recent Results` | 例如 `16` | 可以 | 控制面板列表最多显示多少条 |
+| `Max Floating Texts` | 例如 `12` | 可以 | 控制飘字缓存条数 |
+
+`CombatUIViewBridge` 会订阅 `CombatDamageAppliedEvent`、`CombatHealedEvent`、`CombatKilledEvent`、`CombatHitConfirmedEvent` 和 `CombatResultRejectedEvent`。其中 `CombatHitConfirmedEvent` 只用于 `Blocked`，不会把 `Immune` 当作格挡事件处理。
+
+### CombatToolkitReceiver
+
+| 字段 | 建议填写 | 可留空 | 不填会怎样 |
+| --- | --- | --- | --- |
+| `UI Manager` | 拖 `UIRoot/UIManager` 上的 `UIToolkitUIManager` | 可以 | 自动查找失败时无法打开或刷新面板 |
+| `Combat View Id` | 默认 `CombatPanel` | 不建议 | 必须和 `UIToolkitViewRegistrySO` 中注册的 ViewId 一致 |
+| `Auto Open View` | 开启 | 可以 | 关闭后若面板没打开，只刷新不会自动打开 |
+| `Close On Cleared` | 开启 | 可以 | 收到 Cleared 时关闭 `CombatPanel` |
+
+### CombatToolkitBindingProvider
+
+挂在 `UIRoot/BindingProviders`，并拖进 `UIToolkitViewFactory.Binding Provider Behaviours`。
+
+`UIToolkitViewRegistrySO` 中建议新增：
+
+| 配置项 | 建议值 |
+| --- | --- |
+| `ViewId` | `CombatPanel` |
+| `BindingProviderId` | `CombatPanel` |
+| `LayerId` | `HUD` 或 `Debug`，按 UI 设计决定 |
+| `InputPolicy` | 通常不阻塞玩法输入 |
+
+UXML 推荐元素 name：
+
+| 元素 | name |
+| --- | --- |
+| 标题 Label | `TitleText` |
+| 状态 Label | `StatusText` |
+| 最近结果 ListView | `ListRoot` |
+| 详情 Label | `DetailText` |
+| 最新飘字 Label | `FloatingText` |
+| 最后更新 Label | `ResultText` |
+| 空状态节点 | `EmptyRoot` |
+
+Combat UI 第一版只显示 Combat 结果和飘字数据。HP 条仍由 `NiumaAttribute` 的资源条 UI 显示，Combat UI 不维护 HP 状态。
+
 ## 伤害公式
 
 第一版公式：
