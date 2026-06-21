@@ -6,7 +6,7 @@ using UnityEngine;
 
 namespace NiumaCombat.Service
 {
-    public sealed class CombatHitboxService : ICombatHitboxService
+    public sealed class CombatHitboxService : ICombatHitboxService, ICombatHitboxRuntimeAccess
     {
         private readonly Dictionary<string, CombatHitboxRuntimeState> _activeHitboxes = new Dictionary<string, CombatHitboxRuntimeState>();
         private readonly ICombatCommand _combatCommand;
@@ -33,7 +33,6 @@ namespace NiumaCombat.Service
                 Definition = definition.Clone(),
                 RemainingSeconds = definition.ActiveSeconds,
                 OpenedAtTime = GetTime(),
-                IsActive = true,
                 EffectiveHitCount = 0
             };
 
@@ -56,11 +55,15 @@ namespace NiumaCombat.Service
         {
             return !string.IsNullOrWhiteSpace(attackInstanceId)
                 && _activeHitboxes.TryGetValue(attackInstanceId, out var state)
-                && state != null
-                && state.IsActive;
+                && state != null;
         }
 
-        public void Tick(float deltaTime)
+        void ICombatHitboxRuntimeAccess.Tick(float deltaTime)
+        {
+            TickInternal(deltaTime);
+        }
+
+        private void TickInternal(float deltaTime)
         {
             if (deltaTime <= 0f || _activeHitboxes.Count == 0)
             {
@@ -95,22 +98,16 @@ namespace NiumaCombat.Service
             }
         }
 
-        public bool TryGetState(string attackInstanceId, out CombatHitboxRuntimeState state)
+        bool ICombatHitboxRuntimeAccess.TryGetState(string attackInstanceId, out CombatHitboxRuntimeState state)
         {
-            if (string.IsNullOrWhiteSpace(attackInstanceId))
-            {
-                state = null;
-                return false;
-            }
-
-            return _activeHitboxes.TryGetValue(attackInstanceId, out state) && state != null;
+            return TryGetStateInternal(attackInstanceId, out state);
         }
 
-        public bool TryIncrementHitCount(string attackInstanceId)
+        bool ICombatHitboxRuntimeAccess.TryIncrementHitCount(string attackInstanceId)
         {
-            if (!TryGetState(attackInstanceId, out var state) || state.Definition == null)
+            if (!TryGetStateInternal(attackInstanceId, out var state) || state.Definition == null)
             {
-                return true;
+                return false;
             }
 
             if (state.Definition.MaxHitCount > 0 && state.EffectiveHitCount >= state.Definition.MaxHitCount)
@@ -122,14 +119,26 @@ namespace NiumaCombat.Service
             return true;
         }
 
-        public bool HasReachedMaxHitCount(string attackInstanceId)
+        bool ICombatHitboxRuntimeAccess.TryDecrementHitCount(string attackInstanceId)
         {
-            if (!TryGetState(attackInstanceId, out var state) || state.Definition == null || state.Definition.MaxHitCount <= 0)
+            if (!TryGetStateInternal(attackInstanceId, out var state) || state.Definition == null)
             {
                 return false;
             }
 
-            return state.EffectiveHitCount >= state.Definition.MaxHitCount;
+            state.EffectiveHitCount = Mathf.Max(0, state.EffectiveHitCount - 1);
+            return true;
+        }
+
+        private bool TryGetStateInternal(string attackInstanceId, out CombatHitboxRuntimeState state)
+        {
+            if (string.IsNullOrWhiteSpace(attackInstanceId))
+            {
+                state = null;
+                return false;
+            }
+
+            return _activeHitboxes.TryGetValue(attackInstanceId, out state) && state != null;
         }
 
         private float GetTime()

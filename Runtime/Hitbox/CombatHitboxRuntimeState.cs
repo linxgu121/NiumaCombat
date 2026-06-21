@@ -12,7 +12,6 @@ namespace NiumaCombat.Hitbox
         public float RemainingSeconds;
         public float OpenedAtTime;
         public int EffectiveHitCount;
-        public bool IsActive;
 
         public CombatHitboxRuntimeState Clone()
         {
@@ -23,8 +22,7 @@ namespace NiumaCombat.Hitbox
                 Definition = Definition?.Clone(),
                 RemainingSeconds = RemainingSeconds,
                 OpenedAtTime = OpenedAtTime,
-                EffectiveHitCount = EffectiveHitCount,
-                IsActive = IsActive
+                EffectiveHitCount = EffectiveHitCount
             };
         }
     }

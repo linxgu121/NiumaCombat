@@ -56,14 +56,14 @@ namespace NiumaCombat.Service
         private const string CritDamageAttributeId = "crit_damage";
         private const float DefaultCritDamage = 2f;
 
-        public CombatDamageCalculation CalculateDamage(CombatDamageRequest request, IAttributeQuery attributeQuery, bool forceCritical = false)
+        public CombatDamageCalculation CalculateDamage(CombatDamageRequest request, IAttributeQuery attributeQuery)
         {
             var attackAttribute = ReadAttribute(attributeQuery, request.SourceActorId, request.AttackAttributeId);
             var attackPart = request.BasePower + attackAttribute * request.AttackScale;
             var damageMultiplier = Mathf.Max(0f, request.DamageMultiplier);
             var afterDamageMultiplier = attackPart * damageMultiplier;
 
-            var isCritical = forceCritical || ShouldCrit(request, attributeQuery);
+            var isCritical = ShouldCrit(request, attributeQuery);
             var critDamage = isCritical ? ResolveCritDamage(request, attributeQuery) : 1f;
             var afterCritical = afterDamageMultiplier * critDamage;
 
@@ -143,7 +143,7 @@ namespace NiumaCombat.Service
 
         private static float ResolveDefenseScale(CombatDamageRequest request)
         {
-            return Mathf.Max(0f, request.DefenseScale <= 0f ? 1f : request.DefenseScale);
+            return Mathf.Max(0f, request.DefenseScale);
         }
 
         private static float ReadAttribute(IAttributeQuery attributeQuery, string actorId, string attributeId)

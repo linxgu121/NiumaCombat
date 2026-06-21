@@ -28,6 +28,18 @@ namespace NiumaCombat.Service
         private ICombatFactionResolver _factionResolver;
         private IEventBus _eventBus;
         private ICombatHitboxService _hitboxService;
+        private ICombatHitboxRuntimeAccess _hitboxRuntimeAccess;
+
+        private sealed class HitRecordReservation
+        {
+            public bool Succeeded;
+            public bool IncrementedHitCount;
+            public bool HadPreviousRecord;
+            public string Key;
+            public CombatHitRecord PreviousRecord;
+            public CombatHitRecord CurrentRecord;
+            public CombatFailureReason FailureReason;
+        }
 
         public CombatService(
             IAttributeQuery attributeQuery = null,
@@ -51,11 +63,10 @@ namespace NiumaCombat.Service
 
         public long Revision { get; private set; }
 
-        public ICombatHitboxService HitboxService => _hitboxService;
-
         public void SetHitboxService(ICombatHitboxService hitboxService)
         {
             _hitboxService = hitboxService;
+            _hitboxRuntimeAccess = hitboxService as ICombatHitboxRuntimeAccess;
         }
 
         public bool IsActorAlive(string actorId)
@@ -76,6 +87,11 @@ namespace NiumaCombat.Service
             }
 
             if (string.Equals(sourceActorId, targetActorId, StringComparison.Ordinal))
+            {
+                return false;
+            }
+
+            if (!IsActorAlive(sourceActorId))
             {
                 return false;
             }
@@ -161,7 +177,7 @@ namespace NiumaCombat.Service
 
         public void Tick(float deltaTime)
         {
-            _hitboxService?.Tick(deltaTime);
+            _hitboxRuntimeAccess?.Tick(deltaTime);
         }
 
         public CombatResult ApplyDamage(CombatDamageRequest request)
@@ -176,9 +192,19 @@ namespace NiumaCombat.Service
                 return CommitRejected(BuildFailure(request, dependencyFailure, "Attribute service is missing."));
             }
 
-            if (string.IsNullOrWhiteSpace(request.SourceActorId) || string.IsNullOrWhiteSpace(request.TargetActorId))
+            if (string.IsNullOrWhiteSpace(request.SourceActorId))
             {
-                return CommitRejected(BuildFailure(request, CombatFailureReason.InvalidRequest, "SourceActorId or TargetActorId is empty."));
+                return CommitRejected(BuildFailure(request, CombatFailureReason.SourceActorMissing, "SourceActorId is empty."));
+            }
+
+            if (string.IsNullOrWhiteSpace(request.TargetActorId))
+            {
+                return CommitRejected(BuildFailure(request, CombatFailureReason.TargetActorMissing, "TargetActorId is empty."));
+            }
+
+            if (!IsActorAlive(request.SourceActorId))
+            {
+                return CommitRejected(BuildFailure(request, CombatFailureReason.SourceDead, "Source actor is dead."));
             }
 
             if (string.Equals(request.SourceActorId, request.TargetActorId, StringComparison.Ordinal))
@@ -210,13 +236,9 @@ namespace NiumaCombat.Service
                 return CommitRejected(BuildFailure(request, targetFailure, "Hitbox target validation failed."));
             }
 
+            HitRecordReservation hitReservation = null;
             if (!string.IsNullOrWhiteSpace(request.AttackInstanceId))
             {
-                if (_hitboxService != null && _hitboxService.HasReachedMaxHitCount(request.AttackInstanceId))
-                {
-                    return CommitRejected(BuildFailure(request, CombatFailureReason.MaxHitCountReached, "Attack has reached max hit count."));
-                }
-
                 var record = new CombatHitRecord
                 {
                     AttackInstanceId = request.AttackInstanceId,
@@ -225,22 +247,29 @@ namespace NiumaCombat.Service
                     HitTime = Time.time
                 };
 
-                if (!TryRegisterHit(record))
+                if (!CanRegisterHit(record, out var hitFailureReason))
                 {
-                    var reason = _hitboxService != null && _hitboxService.HasReachedMaxHitCount(request.AttackInstanceId)
-                        ? CombatFailureReason.MaxHitCountReached
-                        : CombatFailureReason.DuplicateHit;
-                    return CommitRejected(BuildFailure(request, reason, "Duplicate hit or max hit count reached."));
+                    return CommitRejected(BuildFailure(request, hitFailureReason, "Duplicate hit or max hit count reached."));
+                }
+
+                hitReservation = ReserveHitRecord(record);
+                if (!hitReservation.Succeeded)
+                {
+                    return CommitRejected(BuildFailure(request, hitReservation.FailureReason, "Duplicate hit or max hit count reached."));
                 }
             }
 
             var hpBefore = _attributeQuery.GetResourceCurrent(request.TargetActorId, _hpResourceId, 0f);
             var calculation = _calculator.CalculateDamage(request, _attributeQuery);
+            var confirmedResult = BuildResultFromDamage(request, calculation, hpBefore, hpBefore);
+            PublishHitConfirmed(confirmedResult);
+
             if (calculation.FinalValue > 0f)
             {
                 var operation = _attributeCommand.ConsumeResource(request.TargetActorId, _hpResourceId, calculation.FinalValue, SourceModuleName);
                 if (!IsAttributeOperationSucceeded(operation))
                 {
+                    RollbackHitReservation(hitReservation);
                     return CommitRejected(BuildFailure(request, CombatFailureReason.AttributeWriteFailed, operation != null ? operation.Message : "Attribute write failed."));
                 }
             }
@@ -266,7 +295,7 @@ namespace NiumaCombat.Service
 
             if (string.IsNullOrWhiteSpace(request.TargetActorId))
             {
-                return CommitRejected(BuildFailure(request, CombatFailureReason.InvalidRequest, "TargetActorId is empty."));
+                return CommitRejected(BuildFailure(request, CombatFailureReason.TargetActorMissing, "TargetActorId is empty."));
             }
 
             if (!IsActorAlive(request.TargetActorId))
@@ -314,30 +343,107 @@ namespace NiumaCombat.Service
                 return false;
             }
 
-            var key = BuildHitKey(record.AttackInstanceId, record.TargetActorId);
-            var hasExistingHit = _hitRecords.TryGetValue(key, out var existingRecord);
-            var definition = TryGetActiveHitboxDefinition(record.AttackInstanceId, out var activeDefinition) ? activeDefinition : null;
-
-            if (hasExistingHit)
-            {
-                if (definition == null || definition.HitSameTargetOnce)
-                {
-                    return false;
-                }
-
-                if (definition.SameTargetHitCooldownSeconds > 0f && record.HitTime - existingRecord.HitTime < definition.SameTargetHitCooldownSeconds)
-                {
-                    return false;
-                }
-            }
-
-            if (_hitboxService != null && !_hitboxService.TryIncrementHitCount(record.AttackInstanceId))
+            if (!CanRegisterHit(record, out _))
             {
                 return false;
             }
 
-            _hitRecords[key] = record.Clone();
+            return ReserveHitRecord(record).Succeeded;
+        }
+
+        private bool CanRegisterHit(CombatHitRecord record, out CombatFailureReason failureReason)
+        {
+            failureReason = CombatFailureReason.None;
+            if (record == null || string.IsNullOrWhiteSpace(record.AttackInstanceId) || string.IsNullOrWhiteSpace(record.TargetActorId))
+            {
+                failureReason = CombatFailureReason.InvalidRequest;
+                return false;
+            }
+
+            var key = BuildHitKey(record.AttackInstanceId, record.TargetActorId);
+            var hasExistingHit = _hitRecords.TryGetValue(key, out var existingRecord);
+            var definition = TryGetActiveHitboxDefinition(record.AttackInstanceId, out var activeDefinition) ? activeDefinition : null;
+
+            if (!hasExistingHit)
+            {
+                return true;
+            }
+
+            if (definition == null || definition.HitSameTargetOnce)
+            {
+                failureReason = CombatFailureReason.DuplicateHit;
+                return false;
+            }
+
+            if (definition.SameTargetHitCooldownSeconds > 0f && record.HitTime - existingRecord.HitTime < definition.SameTargetHitCooldownSeconds)
+            {
+                failureReason = CombatFailureReason.DuplicateHit;
+                return false;
+            }
+
             return true;
+        }
+
+        private HitRecordReservation ReserveHitRecord(CombatHitRecord record)
+        {
+            var reservation = new HitRecordReservation
+            {
+                Succeeded = false,
+                FailureReason = CombatFailureReason.InvalidRequest
+            };
+
+            if (record == null || string.IsNullOrWhiteSpace(record.AttackInstanceId) || string.IsNullOrWhiteSpace(record.TargetActorId))
+            {
+                return reservation;
+            }
+
+            reservation.Key = BuildHitKey(record.AttackInstanceId, record.TargetActorId);
+            reservation.HadPreviousRecord = _hitRecords.TryGetValue(reservation.Key, out var previousRecord);
+            reservation.PreviousRecord = previousRecord?.Clone();
+            reservation.CurrentRecord = record.Clone();
+
+            if (_hitboxRuntimeAccess != null)
+            {
+                if (!_hitboxRuntimeAccess.TryIncrementHitCount(record.AttackInstanceId))
+                {
+                    reservation.FailureReason = CombatFailureReason.MaxHitCountReached;
+                    return reservation;
+                }
+
+                reservation.IncrementedHitCount = true;
+            }
+
+            _hitRecords[reservation.Key] = record.Clone();
+            reservation.Succeeded = true;
+            reservation.FailureReason = CombatFailureReason.None;
+            return reservation;
+        }
+
+        private void RollbackHitReservation(HitRecordReservation reservation)
+        {
+            if (reservation == null || !reservation.Succeeded)
+            {
+                return;
+            }
+
+            if (reservation.IncrementedHitCount && reservation.CurrentRecord != null)
+            {
+                _hitboxRuntimeAccess?.TryDecrementHitCount(reservation.CurrentRecord.AttackInstanceId);
+            }
+
+            if (string.IsNullOrWhiteSpace(reservation.Key))
+            {
+                return;
+            }
+
+            if (reservation.HadPreviousRecord && reservation.PreviousRecord != null)
+            {
+                _hitRecords[reservation.Key] = reservation.PreviousRecord.Clone();
+            }
+            else
+            {
+                _hitRecords.Remove(reservation.Key);
+            }
         }
 
         public void ClearAttackHits(string attackInstanceId)
@@ -378,13 +484,38 @@ namespace NiumaCombat.Service
                 return false;
             }
 
+            CombatHitboxDefinition definition = null;
+            if (!string.IsNullOrWhiteSpace(request.AttackInstanceId))
+            {
+                if (_hitboxRuntimeAccess == null || !_hitboxRuntimeAccess.IsHitboxActive(request.AttackInstanceId))
+                {
+                    failureReason = CombatFailureReason.HitboxNotActive;
+                    return false;
+                }
+
+                if (!_hitboxRuntimeAccess.TryGetState(request.AttackInstanceId, out var state) || state == null)
+                {
+                    failureReason = CombatFailureReason.HitboxNotActive;
+                    return false;
+                }
+
+                if (!string.IsNullOrWhiteSpace(state.OwnerActorId)
+                    && !string.Equals(state.OwnerActorId, request.SourceActorId, StringComparison.Ordinal))
+                {
+                    failureReason = CombatFailureReason.InvalidRequest;
+                    return false;
+                }
+
+                definition = state.Definition;
+            }
+
             if (RequiresHurtbox(request) && string.IsNullOrWhiteSpace(request.HurtboxId))
             {
                 failureReason = CombatFailureReason.InvalidRequest;
                 return false;
             }
 
-            if (TryGetActiveHitboxDefinition(request.AttackInstanceId, out var definition))
+            if (definition != null)
             {
                 if (!HasAllTags(request.TargetTags, definition.RequiredTargetTags))
                 {
@@ -406,12 +537,12 @@ namespace NiumaCombat.Service
         private bool TryGetActiveHitboxDefinition(string attackInstanceId, out CombatHitboxDefinition definition)
         {
             definition = null;
-            if (_hitboxService == null || string.IsNullOrWhiteSpace(attackInstanceId))
+            if (_hitboxRuntimeAccess == null || string.IsNullOrWhiteSpace(attackInstanceId))
             {
                 return false;
             }
 
-            if (!_hitboxService.TryGetState(attackInstanceId, out var state) || state == null || state.Definition == null)
+            if (!_hitboxRuntimeAccess.TryGetState(attackInstanceId, out var state) || state == null || state.Definition == null)
             {
                 return false;
             }
@@ -423,7 +554,7 @@ namespace NiumaCombat.Service
         private static bool RequiresHurtbox(CombatDamageRequest request)
         {
             return request != null
-                && (!string.IsNullOrWhiteSpace(request.AttackInstanceId) || !string.IsNullOrWhiteSpace(request.HitboxId));
+                && !string.IsNullOrWhiteSpace(request.AttackInstanceId);
         }
 
         private static bool HasAllTags(string[] targetTags, string[] requiredTags)
@@ -569,9 +700,7 @@ namespace NiumaCombat.Service
                 SkillId = request?.SkillId,
                 HitboxId = request?.HitboxId,
                 HurtboxId = request?.HurtboxId,
-                ResultType = reason == CombatFailureReason.DuplicateHit || reason == CombatFailureReason.MaxHitCountReached || reason == CombatFailureReason.FactionRejected || reason == CombatFailureReason.FactionUnknown || reason == CombatFailureReason.SelfTargetRejected || reason == CombatFailureReason.TargetDead || reason == CombatFailureReason.RequiredTagMissing || reason == CombatFailureReason.RejectedTagMatched
-                    ? CombatResultType.Filtered
-                    : CombatResultType.Failed,
+                ResultType = ToFailureResultType(reason),
                 FailureReason = reason,
                 HitPoint = request != null ? request.HitPoint : Vector3.zero,
                 ResolvedAtUnixMs = NowMs()
@@ -586,7 +715,7 @@ namespace NiumaCombat.Service
                 SourceActorId = request?.SourceActorId,
                 TargetActorId = request?.TargetActorId,
                 SkillId = request?.SkillId,
-                ResultType = reason == CombatFailureReason.TargetDead ? CombatResultType.Filtered : CombatResultType.Failed,
+                ResultType = ToFailureResultType(reason),
                 FailureReason = reason,
                 HitPoint = request != null ? request.HitPoint : Vector3.zero,
                 ResolvedAtUnixMs = NowMs()
@@ -653,13 +782,12 @@ namespace NiumaCombat.Service
 
             if (result.ResultType == CombatResultType.Damage || result.ResultType == CombatResultType.Blocked)
             {
-                _eventBus.Publish(new CombatHitConfirmedEvent(result));
                 if (result.ResultType == CombatResultType.Damage)
                 {
                     _eventBus.Publish(new CombatDamageAppliedEvent(result));
                 }
             }
-            else if (result.ResultType == CombatResultType.Heal)
+            else if (result.ResultType == CombatResultType.Heal && result.FinalValue > 0f)
             {
                 _eventBus.Publish(new CombatHealedEvent(result));
             }
@@ -669,6 +797,45 @@ namespace NiumaCombat.Service
                 _eventBus.Publish(new CombatKilledEvent(result));
             }
         }
+
+        private void PublishHitConfirmed(CombatResult result)
+        {
+            if (_eventBus == null || result == null)
+            {
+                return;
+            }
+
+            if (result.ResultType == CombatResultType.Damage || result.ResultType == CombatResultType.Blocked)
+            {
+                _eventBus.Publish(new CombatHitConfirmedEvent(result));
+            }
+        }
+
+        private static CombatResultType ToFailureResultType(CombatFailureReason reason)
+        {
+            return IsFilteredFailure(reason) ? CombatResultType.Filtered : CombatResultType.Failed;
+        }
+
+        private static bool IsFilteredFailure(CombatFailureReason reason)
+        {
+            switch (reason)
+            {
+                case CombatFailureReason.DuplicateHit:
+                case CombatFailureReason.MaxHitCountReached:
+                case CombatFailureReason.HitboxNotActive:
+                case CombatFailureReason.FactionRejected:
+                case CombatFailureReason.FactionUnknown:
+                case CombatFailureReason.SelfTargetRejected:
+                case CombatFailureReason.TargetDead:
+                case CombatFailureReason.SourceDead:
+                case CombatFailureReason.RequiredTagMissing:
+                case CombatFailureReason.RejectedTagMatched:
+                    return true;
+                default:
+                    return false;
+            }
+        }
+
         private CombatResult GetLastFromMap(Dictionary<string, Queue<CombatResult>> map, string actorId)
         {
             if (string.IsNullOrWhiteSpace(actorId) || !map.TryGetValue(actorId, out var queue) || queue == null || queue.Count == 0)

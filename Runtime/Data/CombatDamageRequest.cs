@@ -34,6 +34,36 @@ namespace NiumaCombat.Data
         public bool IgnoreResistance;
         public CombatHitReactionData Reaction;
 
+        public bool HasRuntimeFields()
+        {
+            return !string.IsNullOrWhiteSpace(RequestId)
+                || !string.IsNullOrWhiteSpace(AttackInstanceId)
+                || !string.IsNullOrWhiteSpace(SourceActorId)
+                || !string.IsNullOrWhiteSpace(TargetActorId)
+                || !string.IsNullOrWhiteSpace(SkillId)
+                || !string.IsNullOrWhiteSpace(HitboxId)
+                || !string.IsNullOrWhiteSpace(HurtboxId)
+                || (TargetTags != null && TargetTags.Length > 0)
+                || HitPoint.sqrMagnitude > 0.0001f
+                || HitDirection.sqrMagnitude > 0.0001f
+                || SourcePosition.sqrMagnitude > 0.0001f;
+        }
+
+        public void ClearRuntimeFields()
+        {
+            RequestId = string.Empty;
+            AttackInstanceId = string.Empty;
+            SourceActorId = string.Empty;
+            TargetActorId = string.Empty;
+            SkillId = string.Empty;
+            HitboxId = string.Empty;
+            HurtboxId = string.Empty;
+            TargetTags = Array.Empty<string>();
+            HitPoint = Vector3.zero;
+            HitDirection = Vector3.zero;
+            SourcePosition = Vector3.zero;
+        }
+
         public CombatDamageRequest Clone()
         {
             return new CombatDamageRequest

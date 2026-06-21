@@ -21,6 +21,7 @@ namespace NiumaCombat.Enum
         AttributeWriteFailed = 16,
         HitboxNotActive = 17,
         DefinitionMissing = 18,
-        InternalError = 19
+        InternalError = 19,
+        SourceDead = 20
     }
 }

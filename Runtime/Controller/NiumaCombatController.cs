@@ -1,13 +1,15 @@
 using NiumaAttribute.Controller;
 using NiumaAttribute.Service;
+using NiumaCombat.Enum;
 using NiumaCombat.Service;
+using NiumaCore.Event;
 using NiumaCore.Module;
 using UnityEngine;
 
 namespace NiumaCombat.Controller
 {
     [DisallowMultipleComponent]
-    public sealed class NiumaCombatController : MonoBehaviour, IGameModule
+    public sealed class NiumaCombatController : MonoBehaviour, IGameModule, ICombatRuntimeServiceProvider
     {
         [Header("依赖：Attribute")]
         [Tooltip("属性模块控制器。通常拖核心场景 GameplayServicesRoot 上的 NiumaAttributeController；留空时可从 GameContext 自动解析 IAttributeQuery/IAttributeCommand。")]
@@ -34,17 +36,27 @@ namespace NiumaCombat.Controller
         [SerializeField] private int maxActorResults = 32;
 
         [Header("模块启动")]
-        [Tooltip("Awake 时自动初始化战斗模块。核心场景手动统一初始化时可关闭。")]
+        [Tooltip("Awake 时自动初始化战斗模块。仅在能解析 Attribute 依赖时执行；核心场景手动统一 Initialize(context) 时可关闭。")]
         [SerializeField] private bool initializeOnAwake = true;
 
         [Tooltip("OnEnable 时自动启动模块。核心场景手动统一 StartModule 时可关闭。")]
         [SerializeField] private bool startOnEnable = true;
 
-        [Tooltip("初始化时是否把 ICombatService/ICombatQuery/ICombatCommand/ICombatHitboxService 注册进 GameContext。核心场景建议开启。")]
+        [Tooltip("初始化时是否把 ICombatService 和 ICombatHitboxService 注册进 GameContext。需要 Query/Command 时从 ICombatService 使用。核心场景建议开启。")]
         [SerializeField] private bool registerServiceToContext = true;
 
         [Tooltip("是否由本控制器 Update 自动驱动 Tick。若已有统一模块启动器调用 IGameModule.Tick，请关闭，避免 Hitbox 超时计时重复推进。")]
         [SerializeField] private bool driveTickInUpdate = true;
+
+        [Header("Inspector 调试")]
+        [Tooltip("调试用攻击者 ActorId。用于右键菜单检查 CanTarget 和最近输出结果；正式逻辑不会读取这里。")]
+        [SerializeField] private string debugSourceActorId;
+
+        [Tooltip("调试用目标 ActorId。用于右键菜单检查存活、CanTarget 和最近承受结果；正式逻辑不会读取这里。")]
+        [SerializeField] private string debugTargetActorId;
+
+        [Tooltip("右键菜单“手动 Tick 一次”的推进秒数。用于调试 Hitbox ActiveSeconds 超时关闭。")]
+        [SerializeField] private float debugTickSeconds = 0.1f;
 
         private CombatService _combatService;
         private CombatHitboxService _hitboxService;
@@ -53,6 +65,11 @@ namespace NiumaCombat.Controller
         private IAttributeQuery _attributeQuery;
         private IAttributeCommand _attributeCommand;
         private ICombatFactionResolver _factionResolver;
+        private IAttributeQuery _externalAttributeQuery;
+        private IAttributeCommand _externalAttributeCommand;
+        private ICombatFactionResolver _externalFactionResolver;
+        private IEventBus _externalEventBus;
+        private bool _hasExternalEventBus;
         private bool _warnedMissingAwakeContext;
 
         public string ModuleName => "NiumaCombat";
@@ -68,10 +85,10 @@ namespace NiumaCombat.Controller
         {
             if (initializeOnAwake && !IsInitialized)
             {
-                if (_context == null && resolveAttributeFromContext && attributeController == null && !_warnedMissingAwakeContext)
+                if (!CanInitializeWithCurrentInputs(out var message))
                 {
-                    _warnedMissingAwakeContext = true;
-                    Debug.LogWarning("[NiumaCombatController] Awake 自动初始化时没有 GameContext，也没有绑定 NiumaAttributeController。核心场景建议由模块启动器调用 Initialize(context)，或在 Inspector 绑定 Attribute Controller。", this);
+                    WarnMissingAwakeContext(message);
+                    return;
                 }
 
                 Initialize(_context);
@@ -110,6 +127,21 @@ namespace NiumaCombat.Controller
             }
         }
 
+        private void OnValidate()
+        {
+            hpResourceId = string.IsNullOrWhiteSpace(hpResourceId) ? "hp" : hpResourceId.Trim();
+            maxGlobalResults = Mathf.Max(1, maxGlobalResults);
+            maxActorResults = Mathf.Max(1, maxActorResults);
+            debugSourceActorId = debugSourceActorId != null ? debugSourceActorId.Trim() : string.Empty;
+            debugTargetActorId = debugTargetActorId != null ? debugTargetActorId.Trim() : string.Empty;
+            debugTickSeconds = Mathf.Max(0f, debugTickSeconds);
+
+            if (factionResolverProvider != null && !(factionResolverProvider is ICombatFactionResolver))
+            {
+                Debug.LogWarning("[NiumaCombatController] Faction Resolver Provider 绑定的脚本没有实现 ICombatFactionResolver，运行时会被忽略。", this);
+            }
+        }
+
         public void Initialize(GameContext context)
         {
             var previousService = _combatService;
@@ -120,27 +152,27 @@ namespace NiumaCombat.Controller
             var previousRunning = IsRunning;
 
             ICombatService oldCombatService = null;
-            ICombatQuery oldCombatQuery = null;
-            ICombatCommand oldCombatCommand = null;
             ICombatHitboxService oldHitboxService = null;
-            ICombatConfigurationService oldConfigurationService = null;
 
             if (context != null)
             {
                 context.TryGetService(out oldCombatService);
-                context.TryGetService(out oldCombatQuery);
-                context.TryGetService(out oldCombatCommand);
                 context.TryGetService(out oldHitboxService);
-                context.TryGetService(out oldConfigurationService);
             }
 
             try
             {
                 _context = context;
                 ResolveAttributeService(context);
+                if (_attributeQuery == null || _attributeCommand == null)
+                {
+                    throw new System.InvalidOperationException("NiumaCombat requires IAttributeQuery and IAttributeCommand before initialization can complete.");
+                }
+
                 ResolveFactionResolver(context);
 
-                _combatService = new CombatService(_attributeQuery, _attributeCommand, _factionResolver, context?.EventBus, hpResourceId, maxGlobalResults, maxActorResults);
+                var resolvedEventBus = _hasExternalEventBus ? _externalEventBus : context?.EventBus;
+                _combatService = new CombatService(_attributeQuery, _attributeCommand, _factionResolver, resolvedEventBus, hpResourceId, maxGlobalResults, maxActorResults);
                 _hitboxService = new CombatHitboxService(_combatService, () => Time.time);
                 _combatService.SetHitboxService(_hitboxService);
                 _configurationService = _combatService;
@@ -164,7 +196,7 @@ namespace NiumaCombat.Controller
 
                 if (context != null && registerServiceToContext)
                 {
-                    RestoreRegisteredServices(context, oldCombatService, oldCombatQuery, oldCombatCommand, oldHitboxService, oldConfigurationService);
+                    RestoreRegisteredServices(context, oldCombatService, oldHitboxService);
                 }
 
                 Debug.LogError($"[NiumaCombatController] 初始化失败，已回滚：{ex.Message}", this);
@@ -176,6 +208,12 @@ namespace NiumaCombat.Controller
         {
             if (!IsInitialized)
             {
+                if (!CanInitializeWithCurrentInputs(out var message))
+                {
+                    WarnMissingAwakeContext(message);
+                    return;
+                }
+
                 Initialize(_context);
             }
 
@@ -199,6 +237,8 @@ namespace NiumaCombat.Controller
 
         public void SetAttributeService(IAttributeQuery query, IAttributeCommand command)
         {
+            _externalAttributeQuery = query;
+            _externalAttributeCommand = command;
             _attributeQuery = query;
             _attributeCommand = command;
             _configurationService?.SetAttributeService(query, command);
@@ -206,19 +246,34 @@ namespace NiumaCombat.Controller
 
         public void SetFactionResolver(ICombatFactionResolver resolver)
         {
+            _externalFactionResolver = resolver;
             _factionResolver = resolver;
             _configurationService?.SetFactionResolver(resolver);
         }
 
+        public void SetEventBus(IEventBus eventBus)
+        {
+            _externalEventBus = eventBus;
+            _hasExternalEventBus = eventBus != null;
+            _configurationService?.SetEventBus(_hasExternalEventBus ? _externalEventBus : _context?.EventBus);
+        }
+
         private void ResolveAttributeService(GameContext context)
         {
-            _attributeQuery = null;
-            _attributeCommand = null;
+            _attributeQuery = _externalAttributeQuery;
+            _attributeCommand = _externalAttributeCommand;
 
             if (resolveAttributeFromContext && context != null)
             {
-                context.TryGetService(out _attributeQuery);
-                context.TryGetService(out _attributeCommand);
+                if (_attributeQuery == null)
+                {
+                    context.TryGetService(out _attributeQuery);
+                }
+
+                if (_attributeCommand == null)
+                {
+                    context.TryGetService(out _attributeCommand);
+                }
             }
 
             if ((_attributeQuery == null || _attributeCommand == null) && attributeController != null)
@@ -230,9 +285,9 @@ namespace NiumaCombat.Controller
 
         private void ResolveFactionResolver(GameContext context)
         {
-            _factionResolver = null;
+            _factionResolver = _externalFactionResolver;
 
-            if (resolveFactionFromContext && context != null)
+            if (_factionResolver == null && resolveFactionFromContext && context != null)
             {
                 context.TryGetService(out _factionResolver);
             }
@@ -243,13 +298,35 @@ namespace NiumaCombat.Controller
             }
         }
 
+        private bool CanInitializeWithCurrentInputs(out string message)
+        {
+            if (attributeController != null
+                || (_externalAttributeQuery != null && _externalAttributeCommand != null)
+                || (_context != null && resolveAttributeFromContext))
+            {
+                message = null;
+                return true;
+            }
+
+            message = "Cannot initialize NiumaCombat: missing GameContext Attribute service, NiumaAttributeController binding, or externally injected Attribute query/command.";
+            return false;
+        }
+
+        private void WarnMissingAwakeContext(string message)
+        {
+            if (_warnedMissingAwakeContext)
+            {
+                return;
+            }
+
+            _warnedMissingAwakeContext = true;
+            Debug.LogWarning($"[NiumaCombatController] {message}", this);
+        }
+
         private void RegisterServicesToContext(GameContext context)
         {
             context.RegisterService<ICombatService>(_combatService);
-            context.RegisterService<ICombatQuery>(_combatService);
-            context.RegisterService<ICombatCommand>(_combatService);
             context.RegisterService<ICombatHitboxService>(_hitboxService);
-            context.RegisterService<ICombatConfigurationService>(_configurationService);
         }
 
         private void UnregisterServicesFromContext(GameContext context)
@@ -259,40 +336,19 @@ namespace NiumaCombat.Controller
                 context.UnregisterService<ICombatService>();
             }
 
-            if (ReferenceEquals(context.GetService<ICombatQuery>(), _combatService))
-            {
-                context.UnregisterService<ICombatQuery>();
-            }
-
-            if (ReferenceEquals(context.GetService<ICombatCommand>(), _combatService))
-            {
-                context.UnregisterService<ICombatCommand>();
-            }
-
             if (ReferenceEquals(context.GetService<ICombatHitboxService>(), _hitboxService))
             {
                 context.UnregisterService<ICombatHitboxService>();
-            }
-
-            if (ReferenceEquals(context.GetService<ICombatConfigurationService>(), _configurationService))
-            {
-                context.UnregisterService<ICombatConfigurationService>();
             }
         }
 
         private static void RestoreRegisteredServices(
             GameContext context,
             ICombatService oldCombatService,
-            ICombatQuery oldCombatQuery,
-            ICombatCommand oldCombatCommand,
-            ICombatHitboxService oldHitboxService,
-            ICombatConfigurationService oldConfigurationService)
+            ICombatHitboxService oldHitboxService)
         {
             RestoreService(context, oldCombatService);
-            RestoreService(context, oldCombatQuery);
-            RestoreService(context, oldCombatCommand);
             RestoreService(context, oldHitboxService);
-            RestoreService(context, oldConfigurationService);
         }
 
         private static void RestoreService<T>(GameContext context, T service) where T : class
@@ -304,6 +360,115 @@ namespace NiumaCombat.Controller
             else
             {
                 context.UnregisterService<T>();
+            }
+        }
+
+        [ContextMenu("NiumaCombat/调试/重新初始化模块")]
+        private void DebugReinitialize()
+        {
+            Initialize(_context);
+            Debug.Log($"[NiumaCombat] 重新初始化完成：Initialized={IsInitialized}, Running={IsRunning}, Revision={CombatRevision}", this);
+        }
+
+        [ContextMenu("NiumaCombat/调试/启动模块")]
+        private void DebugStartModule()
+        {
+            StartModule();
+            Debug.Log($"[NiumaCombat] 启动模块：Initialized={IsInitialized}, Running={IsRunning}", this);
+        }
+
+        [ContextMenu("NiumaCombat/调试/停止模块")]
+        private void DebugStopModule()
+        {
+            StopModule();
+            Debug.Log("[NiumaCombat] 已停止模块 Tick。", this);
+        }
+
+        [ContextMenu("NiumaCombat/调试/手动 Tick 一次")]
+        private void DebugTickOnce()
+        {
+            if (!EnsureDebugService())
+            {
+                return;
+            }
+
+            _combatService.Tick(debugTickSeconds);
+            Debug.Log($"[NiumaCombat] 手动 Tick：Delta={debugTickSeconds:0.###}, Revision={CombatRevision}", this);
+        }
+
+        [ContextMenu("NiumaCombat/调试/打印模块状态")]
+        private void DebugPrintStatus()
+        {
+            Debug.Log(
+                $"[NiumaCombat] Initialized={IsInitialized}, Running={IsRunning}, Revision={CombatRevision}, HasService={_combatService != null}, HasHitboxService={_hitboxService != null}, HasAttributeQuery={_attributeQuery != null}, HasAttributeCommand={_attributeCommand != null}, HasFactionResolver={_factionResolver != null}, HpResourceId={hpResourceId}",
+                this);
+        }
+
+        [ContextMenu("NiumaCombat/调试/检查目标存活")]
+        private void DebugCheckTargetAlive()
+        {
+            if (!EnsureDebugService())
+            {
+                return;
+            }
+
+            Debug.Log($"[NiumaCombat] IsActorAlive：ActorId={debugTargetActorId}, Alive={_combatService.IsActorAlive(debugTargetActorId)}", this);
+        }
+
+        [ContextMenu("NiumaCombat/调试/检查 CanTarget")]
+        private void DebugCheckCanTarget()
+        {
+            if (!EnsureDebugService())
+            {
+                return;
+            }
+
+            Debug.Log($"[NiumaCombat] CanTarget：Source={debugSourceActorId}, Target={debugTargetActorId}, Result={_combatService.CanTarget(debugSourceActorId, debugTargetActorId)}", this);
+        }
+
+        [ContextMenu("NiumaCombat/调试/打印最近输出结果")]
+        private void DebugPrintRecentOutgoing()
+        {
+            PrintRecentResults(debugSourceActorId, CombatResultActorRole.Source);
+        }
+
+        [ContextMenu("NiumaCombat/调试/打印最近承受结果")]
+        private void DebugPrintRecentIncoming()
+        {
+            PrintRecentResults(debugTargetActorId, CombatResultActorRole.Target);
+        }
+
+        private bool EnsureDebugService()
+        {
+            if (_combatService != null)
+            {
+                return true;
+            }
+
+            Debug.LogWarning("[NiumaCombat] 战斗服务尚未初始化。请先由模块启动器调用 Initialize(context)，或在 Inspector 绑定 Attribute Controller 后使用“重新初始化模块”。", this);
+            return false;
+        }
+
+        private void PrintRecentResults(string actorId, CombatResultActorRole role)
+        {
+            if (!EnsureDebugService())
+            {
+                return;
+            }
+
+            var results = _combatService.GetRecentResults(actorId, role, 8);
+            Debug.Log($"[NiumaCombat] 最近结果：ActorId={actorId}, Role={role}, Count={results.Length}", this);
+            for (var i = 0; i < results.Length; i++)
+            {
+                var result = results[i];
+                if (result == null)
+                {
+                    continue;
+                }
+
+                Debug.Log(
+                    $"[NiumaCombat] #{i} Type={result.ResultType}, Failure={result.FailureReason}, Source={result.SourceActorId}, Target={result.TargetActorId}, Final={result.FinalValue:0.##}, Hp={result.TargetHpBefore:0.##}->{result.TargetHpAfter:0.##}, Killed={result.IsKilled}",
+                    this);
             }
         }
     }
