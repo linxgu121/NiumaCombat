@@ -15,6 +15,7 @@ namespace NiumaCombat.Data
         public string HitboxId;
         public string HurtboxId;
         public Vector3 HitPoint;
+        public Vector3 HitDirection;
         public CombatResultType ResultType;
         public CombatFailureReason FailureReason;
         public float RawValue;
@@ -41,6 +42,7 @@ namespace NiumaCombat.Data
                 HitboxId = HitboxId,
                 HurtboxId = HurtboxId,
                 HitPoint = HitPoint,
+                HitDirection = HitDirection,
                 ResultType = ResultType,
                 FailureReason = FailureReason,
                 RawValue = RawValue,

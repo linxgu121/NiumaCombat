@@ -696,6 +696,7 @@ namespace NiumaCombat.Service
                 FailureReason = CombatFailureReason.None,
                 Reaction = ResolveReaction(request),
                 HitPoint = request.HitPoint,
+                HitDirection = request.HitDirection,
                 ResolvedAtUnixMs = NowMs()
             };
 
@@ -721,6 +722,7 @@ namespace NiumaCombat.Service
                 ResultType = ToFailureResultType(reason),
                 FailureReason = reason,
                 HitPoint = request != null ? request.HitPoint : Vector3.zero,
+                HitDirection = request != null ? request.HitDirection : Vector3.zero,
                 ResolvedAtUnixMs = NowMs()
             };
         }

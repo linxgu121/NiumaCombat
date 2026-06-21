@@ -1,0 +1,16 @@
+{
+  "name": "NiumaCombat.TPCBridge",
+  "references": [
+    "NiumaCore.Runtime",
+    "NiumaCombat.Runtime",
+    "NiumaTPC.Runtime"
+  ],
+  "includePlatforms": [],
+  "excludePlatforms": [],
+  "allowUnsafeCode": false,
+  "overrideReferences": false,
+  "precompiledReferences": [],
+  "autoReferenced": true,
+  "defineConstraints": [],
+  "versionDefines": []
+}

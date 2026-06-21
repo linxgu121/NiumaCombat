@@ -170,6 +170,55 @@ TPC / Action 动画事件
 -> UI 或 TPC Bridge 播放飘字、受击、死亡表现
 ```
 
+## TPC 表现桥接
+
+`TPCCombatBridge` 位于 `Runtime/TPCBridge`，属于独立程序集 `NiumaCombat.TPCBridge`。它引用 `NiumaCombat.Runtime` 和 `NiumaTPC.Runtime`，但 `NiumaCombat.Runtime` 不反向引用 TPC。
+
+建议挂载位置：
+
+```text
+PlayerRoot
+├── PlayerModuleController
+├── CombatActorIdentity
+└── CombatBridge
+    └── TPCCombatBridge
+```
+
+### TPCCombatBridge
+
+| 字段 | 建议填写 | 可留空 | 说明 |
+| --- | --- | --- | --- |
+| `玩家模块控制器` | 拖 `PlayerRoot` 上的 `PlayerModuleController` | 不建议 | 留空且自动查找失败时无法播放 TPC 战斗表现 |
+| `目标身份` | 拖当前角色根节点的 `CombatActorIdentity` | 不建议 | 用 `ActorId` 过滤 CombatResult，避免别人的受击结果触发当前角色动作 |
+| `自动从父节点查找` | 建议开启 | 可以 | 桥接脚本挂在 `PlayerRoot/CombatBridge` 时会自动向父节点找控制器和身份 |
+| `订阅 Combat 事件` | 使用统一 `GameContext` 时开启 | 可以 | 开启后 `Initialize(GameContext)` 会订阅 Combat 事件；关闭时只能由外部直接调用 `ApplyCombatResult` |
+| `接收伤害事件` | 开启 | 可以 | `CombatDamageAppliedEvent` 到达时播放轻受击 / 重受击 / 击倒 |
+| `接收死亡事件` | 开启 | 可以 | `CombatKilledEvent` 到达时播放死亡表现 |
+| `接收格挡事件` | 开启 | 可以 | `CombatHitConfirmedEvent` 中 `Blocked` 会播放格挡表现；第一版 `Immune` 不走该事件路径 |
+| `重受击伤害阈值` | 例如 `30` | 可以 | `FinalValue` 大于等于该值时映射为重受击 |
+| `击倒力度阈值` | 例如 `8` | 可以 | `Reaction.KnockbackForce` 达到阈值或 `ForceKnockdown=true` 时映射为击倒 |
+| `死亡强制冻结输入` | 建议开启 | 可以 | 死亡表现会覆盖请求并冻结输入 |
+| `输出警告日志` | 开发期建议开启 | 可以 | 缺配置或播放失败时输出 Warning |
+
+事件映射规则：
+
+| CombatResult | TPC 表现 |
+| --- | --- |
+| `IsKilled=true` | `死亡` |
+| `ResultType=Blocked` | `格挡 / 免伤` |
+| `Reaction.ForceKnockdown=true` | `击倒` |
+| `Reaction.KnockbackForce >= 击倒力度阈值` | `击倒` |
+| `ResultType=Damage` 且 `FinalValue >= 重受击伤害阈值` | `重受击` |
+| `ResultType=Damage` 且未达到重受击阈值 | `轻受击` |
+
+注意：
+
+- `TPCCombatBridge` 只把 Combat 结果翻译成 `TPCCombatReactionRequest`，不扣血、不判断命中、不切换 TPC 内部 HFSM。
+- 真正播放动作由 `PlayerModuleController.TryPlayCombatReaction` 进入 TPC `ActionArbiter / OverrideState`。
+- TPC 表现动画仍在 `TPCCombatReactionProfile` 中配置，动画数据使用 `MotionClipData`，可通过 TPC RootMotionBaker 烘焙。
+- `TPCCombatBridge` 会把 `CombatResult.HitDirection` 作为 `Reaction.HitDirection` 为空时的兜底方向，并透传 `StaggerSeconds`、`KnockbackDistance`、`HitVfxCueId`、`HitAudioCueId` 到 `TPCCombatReactionRequest`。第一版 TPC 只保留这些字段，后续由受击状态、VFX 或 Audio 桥接消费。
+- 第一版 `Immune` 是过滤 / 拒绝类结果，不会通过 `CombatHitConfirmedEvent` 驱动 TPC 格挡表现；如果后续需要免疫动作或免疫音效，应订阅 `CombatResultRejectedEvent` 或新增专门事件。
+
 ## 伤害公式
 
 第一版公式：
@@ -220,7 +269,7 @@ FinalValue = max(0, AfterResistance * BodyPartMultiplier)
 - `ICombatHitboxService` 不再暴露 `Tick`。业务层只使用 `OpenHitbox`、`CloseHitbox`、`IsHitboxActive`；Hitbox 超时关闭由 `ICombatService.Tick` 内部驱动。
 - `CombatResultType.Blocked` 表示伤害公式最终值 `FinalValue <= 0`，例如被防御、抗性或倍率压到 0。Blocked 会触发 `CombatHitConfirmedEvent`，不会触发 `CombatDamageAppliedEvent`，也不是 Rejected。
 - `CombatResultType.Miss` 第一版保留为后续命中 / 闪避系统使用；当前 Runtime 不主动生成 Miss。技能命中率裁决仍由 Skill 层完成，未命中时不调用 Combat。
-- `Reaction.HitDirection` 的最终兜底由 `CombatService` 处理。Driver 只写入请求级 `HitDirection`，不再直接改写 `Reaction`。
+- `Reaction.HitDirection` 的最终兜底由 `CombatService` 处理；当 `Reaction` 为空时，`CombatResult.HitDirection` 会保留请求级方向，供 TPC / UI 表现桥接兜底使用。Driver 只写入请求级 `HitDirection`，不再直接改写 `Reaction`。
 - `CombatHitboxDriver` 自动查找 `ICombatRuntimeServiceProvider` 只是兜底，并带全局 1 秒节流。正式场景仍建议把 `NiumaCombatController` 拖到 `Combat Service Provider`。
 - `ApplyHeal` 第一版允许 `SourceActorId` 为空，不检查治疗来源是否存活；`TargetActorId` 必须存在且目标存活。
 
